@@ -1,0 +1,14 @@
+[Unit]
+Description=Sonos Artwork Server
+After=network.target
+
+[Service]
+Type=simple
+User=deankondo
+WorkingDirectory=/home/deankondo/sonos-display
+ExecStart=/home/deankondo/sonos-display/sonos-venv/bin/python /home/deankondo/sonos-display/artwork_server.py
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target 

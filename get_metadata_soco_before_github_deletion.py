@@ -1,0 +1,1115 @@
+import soco
+import requests
+from PIL import Image, ImageEnhance, ImageDraw, ImageFont
+import os
+import random
+import shutil
+import json
+import re
+import xml.etree.ElementTree as ET
+from io import BytesIO
+import time
+import psutil
+import subprocess
+import gc  # Add garbage collection
+import logging  # Add proper logging
+from logging.handlers import RotatingFileHandler  # Add rotating file handler
+
+# Update paths to write locally
+JPG_PATH = "Adafruit/artwork.jpg"
+BMP_PATH = "Adafruit/artwork.bmp"
+BMP_BAR_PATH = "Adafruit/artwork_bar.bmp"  # New 320x320 rotated image
+METADATA_JSON_PATH = "Adafruit/current_metadata.json"  # Current song metadata
+PLACEHOLDER_USAGE_FILE = "Adafruit/placeholder_usage.json"
+QUALIA_MOUNT_POINT = "/Volumes/CIRCUITPY"  # Mac mount point for CircuitPython
+
+# Constants for retry logic
+MAX_RETRIES = 3
+RETRY_DELAY = 2  # seconds
+REQUIRED_SPACE_MB = 1  # Minimum required space in MB
+
+# Constants for music detection timeout
+MUSIC_TIMEOUT_SECONDS = 300  # 5 minutes
+BLANK_SCREEN_FILE = "Adafruit/blank_screen.bmp"
+
+# Optimization constants
+NO_MUSIC_LOG_INTERVAL = 60  # Only log no-music status every 60 seconds
+METADATA_WRITE_INTERVAL = 5  # Only write metadata JSON every 5 seconds
+NETWORK_RETRY_INTERVAL = 30  # Retry network operations every 30 seconds
+GC_INTERVAL = 100  # Run garbage collection every 100 iterations
+
+# === Sonos API Credentials ===
+ACCESS_TOKEN = "3YF0qGNzCGNq4zGtCGd7RzNizDdh"
+HOUSEHOLD_ID = "Sonos_j5IdtdMhgYq3W1NBmWR0ODQyTw.2oFUPnsUvdWJnot-sreP"
+
+HEADERS = {
+    "Authorization": f"Bearer {ACCESS_TOKEN}"
+}
+
+# Global variables to track last music detection and current metadata
+last_music_detected = time.time()
+blank_screen_shown = False
+last_no_music_log = 0
+last_metadata_write = 0
+iteration_count = 0
+last_network_error = 0
+
+# Global metadata for bar artwork creation
+current_song_title = ""
+current_song_artist = ""
+current_song_album = ""
+
+# Setup logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(),
+        RotatingFileHandler('sonos_metadata.log', maxBytes=1024*1024, backupCount=3)  # Rotate logs
+    ]
+)
+logger = logging.getLogger(__name__)
+
+def clean_metadata_value(value):
+    """Clean metadata value - remove None, null, undefined, empty strings"""
+    if not value:
+        return ""
+    
+    str_value = str(value).strip()
+    if str_value.lower() in ['none', 'null', 'undefined', '']:
+        return ""
+    
+    return str_value
+
+def check_disk_space():
+    """Check if there's enough disk space"""
+    try:
+        usage = psutil.disk_usage('.')
+        available_mb = usage.free / (1024 * 1024)
+        if available_mb < REQUIRED_SPACE_MB:
+            raise RuntimeError(f"Not enough space. Need {REQUIRED_SPACE_MB}MB, have {available_mb:.1f}MB")
+        return True
+    except Exception as e:
+        raise RuntimeError(f"Error checking disk space: {e}")
+
+def safe_write(func):
+    """Decorator to handle retries and space checks for file operations"""
+    def wrapper(*args, **kwargs):
+        for attempt in range(MAX_RETRIES):
+            try:
+                # Check space before each attempt
+                check_disk_space()
+                result = func(*args, **kwargs)
+                # Force garbage collection after file operations
+                gc.collect()
+                return result
+            except Exception as e:
+                if attempt < MAX_RETRIES - 1:
+                    logger.warning(f"Attempt {attempt + 1} failed: {e}")
+                    logger.info(f"Retrying in {RETRY_DELAY} seconds...")
+                    time.sleep(RETRY_DELAY)
+                else:
+                    logger.error(f"All {MAX_RETRIES} attempts failed")
+                    raise
+    return wrapper
+
+def get_playback_metadata_by_uid():
+    """Get metadata from Sonos Control API with error handling"""
+    global last_network_error
+    
+    # Don't retry too frequently on network errors
+    current_time = time.time()
+    if current_time - last_network_error < NETWORK_RETRY_INTERVAL:
+        logger.debug("Skipping network call due to recent error")
+        return {}
+    
+    try:
+        url = f"https://api.ws.sonos.com/control/api/v1/households/{HOUSEHOLD_ID}/groups"
+        response = requests.get(url, headers=HEADERS, timeout=10)  # Add timeout
+        response.raise_for_status()
+        data = response.json()
+        uid_map = {}
+        for group in data.get("groups", []):
+            metadata = group.get("playback", {}).get("playbackMetadata", {})
+            for player_id in group.get("playerIds", []):
+                uid_map[player_id] = {
+                    "title": metadata.get("trackName"),
+                    "artist": metadata.get("artistName"),
+                    "album": metadata.get("albumName"),
+                    "artwork": metadata.get("trackImageUrl"),
+                    "channel": metadata.get("channelName"),
+                    "service": metadata.get("serviceName"),
+                }
+        return uid_map
+    except Exception as e:
+        last_network_error = current_time
+        logger.warning(f"Network error getting playback metadata: {e}")
+        return {}
+
+def lookup_artwork_via_itunes(artist, track):
+    if not artist or not track:
+        return None
+    query = f"{track} {artist}"
+    response = requests.get(
+        "https://itunes.apple.com/search",
+        params={"term": query, "media": "music", "limit": 1},
+    )
+    results = response.json().get("results", [])
+    if results:
+        art_url = results[0].get("artworkUrl100")
+        if art_url:
+            return art_url.replace("100x100bb", "1200x1200bb")
+    return None
+
+@safe_write
+def copy_to_qualia(bmp_path):
+    """Copy the BMP file to the Qualia display"""
+    try:
+        # Check if Qualia is mounted
+        if not os.path.exists(QUALIA_MOUNT_POINT):
+            print("⚠️ Qualia display not mounted")
+            return False
+            
+        # Copy the file
+        dest_path = os.path.join(QUALIA_MOUNT_POINT, "artwork.bmp")
+        shutil.copy2(bmp_path, dest_path)
+        print(f"✓ Copied artwork to Qualia display: {dest_path}")
+        return True
+    except Exception as e:
+        print(f"✗ Failed to copy to Qualia: {e}")
+        return False
+
+@safe_write
+def download_and_convert_artwork(url, jpg_path, bmp_path):
+    """Download artwork and convert to BMP format with advanced processing"""
+    try:
+        response = requests.get(url, timeout=10)
+        response.raise_for_status()
+        
+        # Create temporary file path
+        temp_bmp = bmp_path + ".temp"
+        
+        try:
+            # Convert to CircuitPython-compatible BMP
+            img = Image.open(BytesIO(response.content)).convert("RGB")
+            
+            # Ensure exactly 720x720 pixels for the display
+            img = img.resize((720, 720), Image.LANCZOS)  # High-quality resizing
+            
+            # Pre-process the image for better color reduction
+            # Apply slight sharpening to improve detail
+            enhancer = ImageEnhance.Sharpness(img)
+            img = enhancer.enhance(1.1)  # Very slight sharpening
+            
+            # Adjust contrast to make colors pop
+            enhancer = ImageEnhance.Contrast(img)
+            img = enhancer.enhance(1.05)  # Very slight contrast boost
+            
+            # Convert to 8-bit indexed color optimized for ESP32 processing
+            # Use simpler quantization for faster ESP32 loading
+            img_8bit = img.quantize(
+                colors=64,   # Reduced from 256 - ESP32 processes fewer colors faster
+                method=0,    # Simple quantization for faster processing
+                dither=0     # No dithering - simpler for ESP32 to process
+            )
+            
+            # Save as BMP to temporary file
+            img_8bit.save(temp_bmp, format="BMP", compression=0)
+            
+            # Verify the temporary BMP file
+            verify_img = Image.open(temp_bmp)
+            print(f"Verification: {verify_img.size}, mode: {verify_img.mode}")
+            
+            # Get file size for reference
+            file_size = os.path.getsize(temp_bmp)
+            print(f"File size: {file_size:,} bytes ({file_size / 1024 / 1024:.1f} MB)")
+            
+            # Only after successful verification, move the file to its final location
+            shutil.move(temp_bmp, bmp_path)
+            
+            print(f"Successfully moved BMP to final location: {bmp_path}")
+            
+            # Copy to Qualia display
+            copy_to_qualia(bmp_path)
+            
+            # Create the 960x320 composite bar artwork with text
+            try:
+                if create_bar_artwork(bmp_path, BMP_BAR_PATH, current_song_title, current_song_artist, current_song_album):
+                    print("✓ Bar composite successfully created")
+                else:
+                    print("✗ Bar composite creation failed")
+            except Exception as bar_error:
+                print(f"✗ Bar composite creation error: {bar_error}")
+                import traceback
+                print("Bar composite error traceback:")
+                print(traceback.format_exc())
+            
+        except Exception as e:
+            # Clean up temporary file if anything goes wrong
+            print(f"Error during conversion: {e}")
+            if os.path.exists(temp_bmp):
+                os.remove(temp_bmp)
+            raise
+            
+    except Exception as e:
+        print(f"Artwork download/convert failed: {e}")
+        raise
+
+def load_placeholder_usage():
+    """Load placeholder usage tracking from disk"""
+    try:
+        if os.path.exists(PLACEHOLDER_USAGE_FILE):
+            with open(PLACEHOLDER_USAGE_FILE, 'r') as f:
+                return json.load(f)
+        else:
+            # Initialize empty usage tracking
+            return {"used": []}
+    except (json.JSONDecodeError, IOError) as e:
+        print(f"Error loading placeholder usage file: {e}")
+        return {"used": []}
+
+def save_placeholder_usage(usage_data):
+    """Save placeholder usage tracking to disk"""
+    try:
+        with open(PLACEHOLDER_USAGE_FILE, 'w') as f:
+            json.dump(usage_data, f, indent=2)
+    except IOError as e:
+        print(f"Error saving placeholder usage file: {e}")
+
+@safe_write
+def use_random_placeholder_image(bmp_path):
+    """Use a random placeholder image from MIL1.bmp to MIL6.bmp"""
+    # Get the directory where artwork.bmp is stored
+    base_dir = os.path.dirname(bmp_path)
+    
+    # List of placeholder images
+    placeholder_files = [f"MIL{i}.bmp" for i in range(1, 7)]  # MIL1.bmp to MIL6.bmp
+    
+    # Find available placeholder files
+    available_placeholders = []
+    for placeholder in placeholder_files:
+        placeholder_path = os.path.join(base_dir, placeholder)
+        if os.path.exists(placeholder_path):
+            available_placeholders.append(placeholder_path)
+    
+    if not available_placeholders:
+        print("No placeholder images found (MIL1.bmp to MIL6.bmp)")
+        create_test_image(bmp_path)  # Fallback to test image
+        return
+    
+    # Randomly select one placeholder
+    selected_placeholder = random.choice(available_placeholders)
+    placeholder_name = os.path.basename(selected_placeholder)
+    print(f"Selected placeholder: {placeholder_name}")
+    
+    # Create temporary file path
+    temp_bmp = bmp_path + ".temp"
+    
+    try:
+        # Copy the selected placeholder to the temporary file
+        shutil.copy2(selected_placeholder, temp_bmp)
+        
+        # Verify the temporary file
+        verify_img = Image.open(temp_bmp)
+        print(f"Verification: {verify_img.size}, mode: {verify_img.mode}")
+        
+        # Only after successful verification, move the file to its final location
+        shutil.move(temp_bmp, bmp_path)
+        
+        print(f"Successfully copied {placeholder_name} to {bmp_path}")
+        
+        # Create the 960x320 composite bar artwork from placeholder
+        try:
+            if create_bar_artwork(bmp_path, BMP_BAR_PATH, current_song_title, current_song_artist, current_song_album):
+                print("✓ Bar composite from placeholder successfully created")
+            else:
+                print("✗ Bar composite from placeholder creation failed")
+        except Exception as bar_error:
+            print(f"✗ Bar composite from placeholder error: {bar_error}")
+        
+    except Exception as e:
+        # Clean up temporary file if anything goes wrong
+        print(f"Error copying placeholder: {e}")
+        if os.path.exists(temp_bmp):
+            os.remove(temp_bmp)
+        raise
+
+def create_test_image(bmp_path):
+    """Create a test image for debugging (fallback)"""
+    print("Creating test image...")
+    
+    # Create a colorful test pattern
+    img = Image.new("RGB", (720, 720), color=(0, 0, 0))  # Black background
+    
+    # Add colored squares for testing
+    from PIL import ImageDraw
+    draw = ImageDraw.Draw(img)
+    
+    # Draw colored rectangles
+    colors = [
+        (255, 0, 0),    # Red
+        (0, 255, 0),    # Green  
+        (0, 0, 255),    # Blue
+        (255, 255, 0),  # Yellow
+        (255, 0, 255),  # Magenta
+        (0, 255, 255),  # Cyan
+        (255, 255, 255) # White
+    ]
+    
+    rect_size = 720 // 3
+    for i, color in enumerate(colors[:6]):  # 2x3 grid
+        x = (i % 3) * rect_size
+        y = (i // 3) * rect_size
+        draw.rectangle([x, y, x + rect_size - 1, y + rect_size - 1], fill=color)
+    
+    # Center white square
+    center_size = 120
+    center_x = (720 - center_size) // 2
+    center_y = (720 - center_size) // 2
+    draw.rectangle([center_x, center_y, center_x + center_size, center_y + center_size], 
+                   fill=(255, 255, 255))
+    
+    # Save the test image
+    img.save(bmp_path, format="BMP", compression=0)
+    print(f"Test image saved to: {bmp_path}")
+    print("Test pattern: 2x3 colored rectangles with white center square")
+    
+    # Create the 960x320 composite bar artwork from test image
+    try:
+        if create_bar_artwork(bmp_path, BMP_BAR_PATH, "Test Song", "Test Artist", "Test Album"):
+            print("✓ Bar composite from test image successfully created")
+        else:
+            print("✗ Bar composite from test image creation failed")
+    except Exception as bar_error:
+        print(f"✗ Bar composite from test image error: {bar_error}")
+
+def get_siriusxm_artwork(channel_name, artist, title):
+    """Try to get artwork from SiriusXM's website"""
+    try:
+        # Clean up channel name for URL
+        channel_slug = re.sub(r'[^a-z0-9]+', '-', channel_name.lower())
+        
+        # Try SiriusXM's channel page
+        url = f"https://www.siriusxm.com/channels/{channel_slug}"
+        print(f"Trying SiriusXM channel page: {url}")
+        response = requests.get(url, timeout=5)
+        if response.status_code == 200:
+            # Look for channel artwork
+            art_match = re.search(r'<meta property="og:image" content="([^"]+)"', response.text)
+            if art_match:
+                return art_match.group(1)
+        
+        # Try SiriusXM's artist page
+        if artist:
+            artist_slug = re.sub(r'[^a-z0-9]+', '-', artist.lower())
+            url = f"https://www.siriusxm.com/artist/{artist_slug}"
+            response = requests.get(url, timeout=5)
+            if response.status_code == 200:
+                art_match = re.search(r'<meta property="og:image" content="([^"]+)"', response.text)
+                if art_match:
+                    return art_match.group(1)
+        
+        return None
+    except Exception as e:
+        print(f"Error getting SiriusXM artwork: {e}")
+        return None
+
+def get_spotify_artwork(artist, title):
+    """Try to get artwork from Spotify"""
+    try:
+        # You would need to implement Spotify API authentication here
+        # This is a placeholder for the Spotify API integration
+        return None
+    except Exception as e:
+        print(f"Error getting Spotify artwork: {e}")
+        return None
+
+def extract_siriusxm_metadata(metadata_xml):
+    """Extract artwork URL and channel info from SiriusXM metadata XML"""
+    try:
+        if not metadata_xml:
+            return None, None
+            
+        # Parse the XML
+        root = ET.fromstring(metadata_xml)
+        
+        # Define namespaces
+        namespaces = {
+            'upnp': 'urn:schemas-upnp-org:metadata-1-0/upnp/',
+            'r': 'urn:schemas-rinconnetworks-com:metadata-1-0/'
+        }
+        
+        # Get artwork URL
+        art_uri = root.find('.//upnp:albumArtURI', namespaces)
+        artwork_url = art_uri.text if art_uri is not None else None
+        
+        # Get stream content
+        stream_content = root.find('.//r:streamContent', namespaces)
+        channel_name = None
+        
+        if stream_content is not None and stream_content.text:
+            # Parse the stream content string
+            # Format is like: TYPE=SNG|TITLE Song|ARTIST Artist|ALBUM Album
+            content_parts = stream_content.text.split('|')
+            for part in content_parts:
+                if part.startswith('TYPE='):
+                    # TYPE=SNG means it's a song
+                    # TYPE=CHN would mean it's a channel
+                    if part == 'TYPE=CHN':
+                        # If it's a channel, the title is the channel name
+                        for title_part in content_parts:
+                            if title_part.startswith('TITLE '):
+                                channel_name = title_part[6:]  # Remove 'TITLE '
+                                break
+                    break
+        
+        return artwork_url, channel_name
+    except Exception as e:
+        print(f"Error parsing SiriusXM metadata: {e}")
+        return None, None
+
+def create_blank_screen(bmp_path):
+    """Create a completely black/blank screen"""
+    try:
+        print("Creating blank screen...")
+        
+        # Create a 720x720 black image
+        img = Image.new('P', (720, 720), 0)  # 0 = black in palette mode
+        
+        # Create a minimal palette with just black
+        palette = [0] * 256  # All black
+        img.putpalette(palette)
+        
+        # Save as BMP
+        img.save(bmp_path, format="BMP", compression=0)
+        
+        print(f"✓ Blank screen created: {bmp_path}")
+        
+        # Create truly blank bar composite too
+        try:
+            # Create a completely blank 960x320 composite (no text, no music notes)
+            blank_composite = Image.new('RGB', (960, 320), (0, 0, 0))  # Pure black
+            
+            # Save directly as BMP
+            temp_bar_bmp = BMP_BAR_PATH + ".temp"
+            blank_composite_indexed = blank_composite.quantize(colors=64, method=0, dither=0)
+            blank_composite_indexed.save(temp_bar_bmp, format="BMP", compression=0)
+            
+            # Move to final location
+            shutil.move(temp_bar_bmp, BMP_BAR_PATH)
+            
+            print("✓ Blank bar composite successfully created")
+        except Exception as bar_error:
+            print(f"✗ Blank bar composite error: {bar_error}")
+        
+        return True
+        
+    except Exception as e:
+        print(f"✗ Error creating blank screen: {e}")
+        return False
+
+def is_music_playing(soco_track, control_track):
+    """Check if music is currently playing"""
+    # Check if there's a title and it's not empty
+    title = soco_track.get("title") or control_track.get("title")
+    
+    # Check if there's a position and duration (indicates active playback)
+    position = soco_track.get("position", "0:00:00")
+    duration = soco_track.get("duration", "0:00:00")
+    
+    # Check if the player state indicates playing
+    player_state = soco_track.get("state", "").lower()
+    
+    # Music is playing if:
+    # 1. There's a meaningful title (not empty or just whitespace)
+    # 2. Position and duration are meaningful (not 0:00:00)
+    # 3. Player state is "playing" (not "stopped", "paused", etc.)
+    has_title = title and title.strip() != ""
+    has_playback = position != "0:00:00" and duration != "0:00:00"
+    is_playing = player_state == "playing"
+    
+    # NEW: Check if position is advancing (indicates active playback even if duration is 0:00:00)
+    # Parse position to see if it's a valid time format
+    position_advancing = False
+    try:
+        if position != "0:00:00" and ":" in position:
+            # If position is not 0:00:00 and has time format, consider it advancing
+            position_advancing = True
+    except:
+        pass
+    
+    # For debugging - only log when music is detected to reduce noise
+    if has_title:
+        logger.debug(f"Music detection - Title: '{title}', Position: {position}, Duration: {duration}, State: {player_state}")
+        logger.debug(f"Music detection - Has title: {has_title}, Has playback: {has_playback}, Is playing: {is_playing}, Position advancing: {position_advancing}")
+    
+    # Music is playing if there's a title AND either:
+    # 1. Full playback info (position + duration)
+    # 2. Playing state is explicitly "playing"
+    # 3. Position is advancing (even if duration is 0:00:00)
+    return has_title and (has_playback or is_playing or position_advancing)
+
+@safe_write
+def create_bar_artwork(source_bmp_path, bar_bmp_path, title="", artist="", album=""):
+    """Create a 960x320 composite image with artwork on left and text on right"""
+    try:
+        print(f"Creating bar composite from: {source_bmp_path}")
+        print(f"Metadata: {title} - {artist} - {album}")
+        
+        # Create proper 960x320 composite for bar display
+        composite_width = 960   # Full width for bar display
+        composite_height = 320  # Full height for bar display
+        artwork_size = 320      # Square artwork on left side
+        
+        # Create the composite image with dark background
+        composite = Image.new('RGB', (composite_width, composite_height), (20, 20, 20))
+        
+        # Add artwork on the left if available
+        if os.path.exists(source_bmp_path):
+            file_size = os.path.getsize(source_bmp_path)
+            if file_size > 1000:  # Valid file
+                try:
+                    # Load and resize artwork
+                    artwork = Image.open(source_bmp_path)
+                    if artwork.mode != 'RGB':
+                        artwork = artwork.convert('RGB')
+                    
+                    # Resize to 320x320 and paste on left side
+                    artwork_resized = artwork.resize((artwork_size, artwork_size), Image.LANCZOS)
+                    composite.paste(artwork_resized, (0, 0))
+                    print("✓ Artwork added to composite")
+                except Exception as e:
+                    print(f"⚠️ Artwork processing failed: {e}")
+        
+        # Add text on the right side
+        try:
+            draw = ImageDraw.Draw(composite)
+            
+            # Text area: starts after artwork - proper spacing for 960x320
+            text_start_x = artwork_size + 20  # Proper margin for full-size composite
+            text_width = composite_width - artwork_size - 40  # Available width for text
+            
+            # Try to load a font, fallback to default
+            try:
+                # Try to find a system font
+                font_large = ImageFont.truetype("/System/Library/Fonts/Arial.ttf", 46)
+                font_medium = ImageFont.truetype("/System/Library/Fonts/Arial.ttf", 36)
+                font_small = ImageFont.truetype("/System/Library/Fonts/Arial.ttf", 28)
+            except:
+                try:
+                    # Linux font path
+                    font_large = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 46)
+                    font_medium = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 36)
+                    font_small = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 28)
+                except:
+                    # Fallback to default font
+                    font_large = ImageFont.load_default()
+                    font_medium = ImageFont.load_default()
+                    font_small = ImageFont.load_default()
+            
+            # Text layout - align to top with variable spacing
+            line_height = 40   # Line height within each text block
+            artist_to_title_spacing = 55  # Spacing between artist and title
+            title_to_album_spacing = 73   # Spacing between title and album
+            y_start = 20       # Moved up from 40 to align to top
+            current_y = y_start
+            
+            # Artist (top line, white) - with word wrapping and ellipsis
+            clean_artist = clean_metadata_value(artist)
+            if clean_artist:
+                max_chars_per_line = 30  # Slightly more for medium font
+                words = clean_artist.split()
+                lines = []
+                current_line = ""
+                
+                for word in words:
+                    test_line = current_line + (" " if current_line else "") + word
+                    if len(test_line) <= max_chars_per_line:
+                        current_line = test_line
+                    else:
+                        if current_line:
+                            lines.append(current_line)
+                            current_line = word
+                        else:
+                            # Single word is too long, just add it
+                            lines.append(word)
+                
+                if current_line:
+                    lines.append(current_line)
+                
+                # Handle truncation with ellipsis if more than 2 lines
+                if len(lines) > 2:
+                    # Truncate to 2 lines and add ellipsis
+                    lines = lines[:2]
+                    # Make sure ellipsis fits on the second line
+                    while len(lines[1] + "...") > max_chars_per_line and " " in lines[1]:
+                        words_in_line = lines[1].split()
+                        lines[1] = " ".join(words_in_line[:-1])
+                    lines[1] += "..."
+                
+                # Draw each line of the artist
+                for i, line in enumerate(lines[:2]):  # Max 2 lines for artist
+                    draw.text((text_start_x, current_y + (i * line_height)), line, 
+                             fill=(255, 255, 255), font=font_medium)
+                    print(f"✓ Added artist line {i+1}: {line}")
+                
+                # Advance based on actual number of artist lines used
+                artist_lines_used = min(len(lines), 2)
+                if artist_lines_used > 1:
+                    # Multi-line artist: advance by the space used by all lines plus spacing to title
+                    current_y += (artist_lines_used * line_height) + (artist_to_title_spacing - line_height)
+                else:
+                    # Single line artist: normal spacing to title
+                    current_y += artist_to_title_spacing
+            else:
+                print("✓ Artist data missing - skipping")
+            
+            # Title (middle line, gold) - with word wrapping and ellipsis
+            clean_title = clean_metadata_value(title)
+            if clean_title:
+                title_text = clean_title  # No music note for more space
+                
+                # Word wrapping for long titles - increased limit without music note
+                max_chars_per_line = 22  # Increased from 20 since no music note
+                words = title_text.split()
+                lines = []
+                current_line = ""
+                
+                for word in words:
+                    test_line = current_line + (" " if current_line else "") + word
+                    if len(test_line) <= max_chars_per_line:
+                        current_line = test_line
+                    else:
+                        if current_line:
+                            lines.append(current_line)
+                            current_line = word
+                        else:
+                            # Single word is too long, just add it
+                            lines.append(word)
+                
+                if current_line:
+                    lines.append(current_line)
+                
+                # Handle truncation with ellipsis if more than 2 lines
+                if len(lines) > 2:
+                    # Truncate to 2 lines and add ellipsis
+                    lines = lines[:2]
+                    # Make sure ellipsis fits on the second line
+                    while len(lines[1] + "...") > max_chars_per_line and " " in lines[1]:
+                        words_in_line = lines[1].split()
+                        lines[1] = " ".join(words_in_line[:-1])
+                    lines[1] += "..."
+                
+                # Draw each line of the title with proper spacing
+                title_line_height = 51  # Increased by 3 more pixels (48 + 3)
+                for i, line in enumerate(lines[:2]):  # Max 2 lines for title
+                    draw.text((text_start_x, current_y + (i * title_line_height)), line, 
+                             fill=(255, 221, 0), font=font_large)
+                    print(f"✓ Added title line {i+1}: {line}")
+                
+                # Advance based on actual number of title lines used
+                title_lines_used = min(len(lines), 2)
+                if title_lines_used > 1:
+                    # Multi-line title: advance by the space used by all lines plus spacing to album
+                    current_y += (title_lines_used * title_line_height) + (title_to_album_spacing - title_line_height)
+                else:
+                    # Single line title: normal spacing to album
+                    current_y += title_to_album_spacing
+            else:
+                print("✓ Title data missing - skipping")
+
+            # Album (bottom line, gray) - with word wrapping and ellipsis
+            clean_album = clean_metadata_value(album)
+            if clean_album:
+                max_chars_per_line = 34  # More for smaller font
+                words = clean_album.split()
+                lines = []
+                current_line = ""
+                
+                for word in words:
+                    test_line = current_line + (" " if current_line else "") + word
+                    if len(test_line) <= max_chars_per_line:
+                        current_line = test_line
+                    else:
+                        if current_line:
+                            lines.append(current_line)
+                            current_line = word
+                        else:
+                            # Single word is too long, just add it
+                            lines.append(word)
+                
+                if current_line:
+                    lines.append(current_line)
+                
+                # Handle truncation with ellipsis if more than 2 lines
+                if len(lines) > 2:
+                    # Truncate to 2 lines and add ellipsis
+                    lines = lines[:2]
+                    # Make sure ellipsis fits on the second line
+                    while len(lines[1] + "...") > max_chars_per_line and " " in lines[1]:
+                        words_in_line = lines[1].split()
+                        lines[1] = " ".join(words_in_line[:-1])
+                    lines[1] += "..."
+                
+                # Draw each line of the album
+                for i, line in enumerate(lines[:2]):  # Max 2 lines for album
+                    draw.text((text_start_x, current_y + (i * line_height)), line, 
+                             fill=(200, 200, 200), font=font_small)
+                    print(f"✓ Added album line {i+1}: {line}")
+                
+                # Final section doesn't need to advance current_y
+            else:
+                print("✓ Album data missing - skipping")
+            
+        except Exception as text_error:
+            print(f"⚠️ Text rendering failed: {text_error}")
+            # Continue without text if font rendering fails
+        
+        # CRITICAL: Rotate the composite 90 degrees clockwise for portrait display
+        print("Rotating composite 90° clockwise for portrait display...")
+        composite_rotated = composite.rotate(-90, expand=True)  # -90 = clockwise rotation
+        print(f"✓ Rotated: {composite.width}x{composite.height} → {composite_rotated.width}x{composite_rotated.height}")
+        
+        # Save the rotated composite
+        temp_bmp = bar_bmp_path + ".temp"
+        print(f"Saving rotated composite to: {temp_bmp}")
+        
+        try:
+            # Convert to indexed color optimized for ESP32 processing
+            composite_rotated_indexed = composite_rotated.quantize(colors=64, method=0, dither=0)
+            composite_rotated_indexed.save(temp_bmp, format="BMP", compression=0)
+            
+            # Verify the file
+            temp_size = os.path.getsize(temp_bmp)
+            print(f"Rotated composite file size: {temp_size} bytes")
+            
+            verify_img = Image.open(temp_bmp)
+            print(f"Rotated composite verification: {verify_img.size}, mode: {verify_img.mode}")
+            
+            # Move to final location
+            shutil.move(temp_bmp, bar_bmp_path)
+            
+            final_size = os.path.getsize(bar_bmp_path)
+            print(f"✓ Rotated bar composite created: {bar_bmp_path} ({final_size} bytes)")
+            print(f"✓ Ready for portrait display: 320x960 (no ESP32 rotation needed)")
+            return True
+            
+        except Exception as e:
+            print(f"✗ Error saving composite: {e}")
+            if os.path.exists(temp_bmp):
+                os.remove(temp_bmp)
+            raise
+            
+    except Exception as e:
+        print(f"✗ Failed to create bar composite: {e}")
+        import traceback
+        print("Full error traceback:")
+        print(traceback.format_exc())
+        return False
+
+def save_current_metadata(title, artist, album):
+    """Save current metadata to JSON file for web access with throttling"""
+    global last_metadata_write
+    
+    current_time = time.time()
+    if current_time - last_metadata_write < METADATA_WRITE_INTERVAL:
+        return  # Skip writing if too recent
+    
+    try:
+        metadata = {
+            "title": clean_metadata_value(title),
+            "artist": clean_metadata_value(artist),
+            "album": clean_metadata_value(album),
+            "last_updated": time.time()
+        }
+        
+        with open(METADATA_JSON_PATH, 'w') as f:
+            json.dump(metadata, f, indent=2)
+        
+        last_metadata_write = current_time
+        logger.info(f"✓ Metadata saved to {METADATA_JSON_PATH}")
+        
+    except Exception as e:
+        logger.error(f"✗ Failed to save metadata: {e}")
+
+def main():
+    global last_music_detected, blank_screen_shown, current_song_title, current_song_artist, current_song_album
+    global last_no_music_log, iteration_count
+    
+    # Track last processed song to avoid unnecessary processing
+    last_title = None
+    last_artist = None
+    last_album = None
+    
+    logger.info("Starting Sonos metadata monitor...")
+    logger.info("Press Ctrl+C to exit")
+    logger.info(f"Will show blank screen after {MUSIC_TIMEOUT_SECONDS} seconds of no music")
+    logger.info("OPTIMIZED: Only process artwork when song changes, check every 1 second")
+    logger.info("FAST RESPONSE: 1-second polling for immediate song change detection")
+    
+    while True:
+        try:
+            iteration_count += 1
+            
+            # Run garbage collection periodically
+            if iteration_count % GC_INTERVAL == 0:
+                gc.collect()
+                logger.debug(f"Garbage collection completed (iteration {iteration_count})")
+            
+            # System resource check
+            try:
+                cpu_percent = psutil.cpu_percent(interval=0.1)  # Reduced interval
+                memory = psutil.virtual_memory()
+                if cpu_percent > 80 or memory.percent > 85:
+                    logger.warning(f"⚠️ High system load: CPU {cpu_percent:.1f}%, Memory {memory.percent:.1f}%")
+                    logger.info("Sleeping longer to prevent overload...")
+                    time.sleep(10)  # Extra sleep when system is stressed
+            except:
+                pass  # If psutil fails, continue anyway
+            
+            # Check if we should show blank screen FIRST
+            current_time = time.time()
+            time_since_music = current_time - last_music_detected
+            
+            if time_since_music > MUSIC_TIMEOUT_SECONDS and not blank_screen_shown:
+                logger.info(f"\nNo music detected for {time_since_music:.0f} seconds, showing blank screen...")
+                if create_blank_screen(BMP_PATH):
+                    copy_to_qualia(BMP_PATH)
+                    # Clear global metadata and save empty JSON for Qualia displays
+                    current_song_title = ""
+                    current_song_artist = ""
+                    current_song_album = ""
+                    save_current_metadata("", "", "")
+                    blank_screen_shown = True
+                    logger.info("✓ Blank screen displayed with empty metadata")
+                time.sleep(10)  # Check every 10 seconds when showing blank screen
+                continue
+            
+            # Get current metadata
+            try:
+                soco_devices = soco.discover()
+                if not soco_devices:
+                    current_time = time.time()
+                    if current_time - last_no_music_log > NO_MUSIC_LOG_INTERVAL:
+                        logger.warning("No Sonos devices found.")
+                        last_no_music_log = current_time
+                    time.sleep(10)  # Longer sleep when no devices
+                    continue
+            except Exception as e:
+                current_time = time.time()
+                if current_time - last_no_music_log > NO_MUSIC_LOG_INTERVAL:
+                    logger.warning(f"Error discovering Sonos devices: {e}")
+                    last_no_music_log = current_time
+                time.sleep(10)
+                continue
+
+            # Get metadata from Sonos Control API
+            control_api_data = get_playback_metadata_by_uid()
+            music_found = False
+
+            for speaker in soco_devices:
+                if speaker.player_name != "Home Office":
+                    continue
+
+                logger.info(f"\n--- {speaker.player_name} ---")
+                try:
+                    # Get metadata from SoCo
+                    soco_track = speaker.get_current_track_info()
+                    control_track = control_api_data.get(speaker.uid, {})
+
+                    # Check if music is playing FIRST
+                    if is_music_playing(soco_track, control_track):
+                        music_found = True
+                        last_music_detected = current_time
+                        if blank_screen_shown:
+                            print("Music detected again, clearing blank screen flag")
+                            blank_screen_shown = False
+                        
+                        # Only process metadata if music is actually playing
+                        # Debug: Print all available track info (only when song changes)
+                        logger.debug("\nDEBUG - Available track info:")
+                        logger.debug("SoCo track info: " + json.dumps(soco_track, indent=2))
+                        logger.debug("Control API track info: " + json.dumps(control_track, indent=2))
+
+                        # Combine metadata, preferring SoCo over Control API
+                        title = soco_track.get("title") or control_track.get("title")
+                        artist = soco_track.get("artist") or control_track.get("artist")
+                        album = soco_track.get("album") or control_track.get("album")
+                        
+                        # Try different ways to detect SiriusXM
+                        channel = control_track.get("channel")
+                        service = control_track.get("service")
+                        
+                        # Fall back to SoCo if Control API doesn't have it
+                        if not channel:
+                            channel = soco_track.get("channel")
+                        if not service:
+                            service = soco_track.get("service")
+                            
+                        uri = soco_track.get("uri", "")
+                        metadata = soco_track.get("metadata", "")
+                        
+                        print("\nDEBUG - Service detection:")
+                        print(f"Channel: {channel}")
+                        print(f"Service: {service}")
+                        print(f"URI: {uri}")
+
+                        # Try to get artwork in order of preference:
+                        # 1. SoCo album_art
+                        art_url = soco_track.get("album_art")
+                        if art_url and not art_url.startswith("http"):
+                            art_url = f"http://{speaker.ip_address}:1400{art_url}"
+
+                        # 2. Sonos Control API artwork
+                        if not art_url:
+                            art_url = control_track.get("artwork")
+
+                        # 3. SiriusXM artwork from metadata
+                        if not art_url and "siriusxm.com" in metadata:
+                            print("Found SiriusXM metadata, extracting artwork URL and channel info...")
+                            art_url, siriusxm_channel = extract_siriusxm_metadata(metadata)
+                            if art_url:
+                                print(f"Found SiriusXM artwork URL: {art_url}")
+                            if siriusxm_channel:
+                                print(f"Found SiriusXM channel: {siriusxm_channel}")
+                                channel = siriusxm_channel  # Update channel name
+
+                        # 4. SiriusXM website (if on SiriusXM)
+                        is_siriusxm = (
+                            (channel and "siriusxm" in channel.lower()) or
+                            (service and "siriusxm" in service.lower()) or
+                            (uri and "siriusxm" in uri.lower()) or
+                            "siriusxm.com" in metadata
+                        )
+                        
+                        print(f"\nDEBUG - SiriusXM detection: {is_siriusxm}")
+                        
+                        if not art_url and is_siriusxm:
+                            print("Trying SiriusXM website...")
+                            # Try to get channel name from various sources
+                            channel_name = (
+                                channel or 
+                                service or 
+                                uri.split("/")[-1] if uri else None
+                            )
+                            print(f"Using channel name: {channel_name}")
+                            art_url = get_siriusxm_artwork(channel_name, artist, title)
+
+                        # 5. Skip Spotify for now to reduce API calls
+                        # if not art_url:
+                        #     print("Trying Spotify artwork...")
+                        #     art_url = get_spotify_artwork(artist, title)
+
+                        # 6. iTunes lookup - only if no other source found
+                        if not art_url:
+                            print("No artwork from Sonos or streaming services, trying iTunes...")
+                            art_url = lookup_artwork_via_itunes(artist, title)
+
+                        print("\nFinal metadata:")
+                        print("Title:  ", title)
+                        print("Artist: ", artist)
+                        print("Album:  ", album)
+                        print("Channel:", channel)
+                        print("Service:", service)
+                        print("Artwork:", art_url or "None")
+
+                        # Save current metadata to JSON file for web access
+                        save_current_metadata(title, artist, album)
+                        
+                        # Update global metadata for bar artwork creation (clean values)
+                        current_song_title = clean_metadata_value(title)
+                        current_song_artist = clean_metadata_value(artist)
+                        current_song_album = clean_metadata_value(album)
+
+                        # Only process artwork if song has changed
+                        song_changed = (title != last_title or artist != last_artist or album != last_album)
+                        
+                        if song_changed:
+                            print(f"\n🎵 NEW SONG DETECTED! Processing artwork...")
+                            print(f"Previous: {last_title} - {last_artist}")
+                            print(f"Current:  {title} - {artist}")
+                            
+                            # Update tracking variables
+                            last_title = title
+                            last_artist = artist
+                            last_album = album
+
+                            if art_url:
+                                download_and_convert_artwork(art_url, JPG_PATH, BMP_PATH)
+                            else:
+                                print("No artwork found from any source, using random placeholder image...")
+                                use_random_placeholder_image(BMP_PATH)
+                        else:
+                            print(f"Same song playing: {title} - {artist} (skipping artwork processing)")
+                            # Still save metadata in case other info changed
+                            save_current_metadata(title, artist, album)
+                    else:
+                        # Music is not playing, reduce logging frequency
+                        current_time = time.time()
+                        if current_time - last_no_music_log > NO_MUSIC_LOG_INTERVAL:
+                            logger.debug("Music detection - Title: 'None', Position: 0:00:00, Duration: 0:00:00, State:")
+                            logger.debug("Music detection - Has title: None, Has playback: False, Is playing: False")
+                            logger.info("No music playing, skipping metadata processing")
+                            last_no_music_log = current_time
+
+                except Exception as e:
+                    print(f"Error with {speaker.player_name}: {e}")
+                    import traceback
+                    print("Full error traceback:")
+                    print(traceback.format_exc())
+                    
+                    # Only create placeholder if we haven't processed this song yet
+                    # (avoid unnecessary processing on repeated errors for same song)
+                    current_title = None
+                    current_artist = None
+                    try:
+                        # Try to get basic title/artist even if there was an error
+                        soco_track = speaker.get_current_track_info()
+                        current_title = soco_track.get("title", "")
+                        current_artist = soco_track.get("artist", "")
+                    except:
+                        pass
+                    
+                    # Only process placeholder if this appears to be a new song
+                    if (current_title != last_title or current_artist != last_artist) and current_title:
+                        print(f"Creating placeholder for new song: {current_title} - {current_artist}")
+                        use_random_placeholder_image(BMP_PATH)
+                        # Update tracking to prevent repeated processing
+                        last_title = current_title
+                        last_artist = current_artist
+                        last_album = None  # Unknown due to error
+                    else:
+                        print("Skipping placeholder creation - same song or no title detected")
+
+            # If no music was found, update the timeout tracking
+            if not music_found:
+                time_since_music = current_time - last_music_detected
+                current_time = time.time()
+                if current_time - last_no_music_log > NO_MUSIC_LOG_INTERVAL:
+                    logger.info(f"No music detected. Time since last music: {time_since_music:.0f} seconds")
+                    last_no_music_log = current_time
+                if time_since_music > MUSIC_TIMEOUT_SECONDS and not blank_screen_shown:
+                    logger.info(f"Showing blank screen after {time_since_music:.0f} seconds of no music")
+                    if create_blank_screen(BMP_PATH):
+                        copy_to_qualia(BMP_PATH)
+                        # Clear global metadata and save empty JSON for Qualia displays
+                        current_song_title = ""
+                        current_song_artist = ""
+                        current_song_album = ""
+                        save_current_metadata("", "", "")
+                        blank_screen_shown = True
+                        logger.info("✓ Blank screen displayed with empty metadata")
+
+        except Exception as e:
+            logger.error(f"Error in main loop: {e}")
+            import traceback
+            logger.error("Full error traceback:")
+            logger.error(traceback.format_exc())
+        
+        # Only log sleep message occasionally to reduce noise
+        if iteration_count % 60 == 0:  # Log every 60 iterations (about once per minute)
+            logger.debug(f"💤 Sleeping 1 second before next check... (iteration {iteration_count})")
+        time.sleep(1)  # FAST: Check every 1 second for immediate song change detection
+
+if __name__ == "__main__":
+    main()

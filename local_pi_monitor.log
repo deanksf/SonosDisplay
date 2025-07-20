@@ -1,0 +1,151 @@
+🔍 Raspberry Pi Load Monitor for Dual Sonos Displays
+====================================================
+Monitoring for 600 seconds...
+Logging to: pi_load_monitor.log
+
+Starting monitoring (Ctrl+C to stop early)...
+
+Real-time stats:
+Time                 CPU    Memory  Load   HTTP_Conn
+----                 ---    ------  ----   ---------
+09:18:21             CPU:0.0% Memory:13.7% Load:0.30 Connections:2
+09:18:26             CPU:33.3% Memory:13.7% Load:0.27 Connections:3
+09:18:31             CPU:25.0% Memory:13.7% Load:0.25 Connections:2
+09:18:36             CPU:33.3% Memory:13.7% Load:0.23 Connections:2
+09:18:41             CPU:0.0% Memory:13.7% Load:0.21 Connections:3
+09:18:47             CPU:33.3% Memory:13.6% Load:0.20 Connections:2
+09:18:52             CPU:0.0% Memory:13.7% Load:0.16 Connections:2
+09:18:57             CPU:0.0% Memory:13.7% Load:0.15 Connections:2
+09:19:02             CPU:0.0% Memory:13.7% Load:0.14 Connections:2
+09:19:07             CPU:0.0% Memory:13.7% Load:0.13 Connections:3
+09:19:12             CPU:0.0% Memory:13.7% Load:0.12 Connections:2
+09:19:18             CPU:0.0% Memory:13.2% Load:0.11 Connections:2
+09:19:23             CPU:50.0% Memory:13.2% Load:0.10 Connections:2
+09:19:28             CPU:0.0% Memory:13.2% Load:0.09 Connections:2
+09:19:33             CPU:33.3% Memory:13.2% Load:0.08 Connections:2
+09:19:38             CPU:50.0% Memory:13.1% Load:0.08 Connections:2
+09:19:44             CPU:0.0% Memory:13.1% Load:0.07 Connections:3
+09:19:49             CPU:33.3% Memory:13.1% Load:0.06 Connections:2
+09:19:54             CPU:0.0% Memory:13.1% Load:0.06 Connections:2
+09:19:59             CPU:0.0% Memory:13.2% Load:0.05 Connections:3
+09:20:04             CPU:0.0% Memory:13.2% Load:0.05 Connections:2
+09:20:10             CPU:0.0% Memory:13.1% Load:0.05 Connections:2
+09:20:15             CPU:0.0% Memory:13.1% Load:0.04 Connections:2
+09:20:20             CPU:0.0% Memory:13.1% Load:0.04 Connections:2
+09:20:25             CPU:50.0% Memory:13.1% Load:0.03 Connections:2
+09:20:30             CPU:0.0% Memory:13.1% Load:0.03 Connections:2
+09:20:35             CPU:0.0% Memory:13.1% Load:0.03 Connections:3
+09:20:41             CPU:0.0% Memory:13.1% Load:0.03 Connections:2
+09:20:46             CPU:0.0% Memory:13.2% Load:0.02 Connections:2
+09:20:51             CPU:25.0% Memory:13.1% Load:0.02 Connections:2
+09:20:56             CPU:0.0% Memory:13.2% Load:0.02 Connections:2
+09:21:02             CPU:0.0% Memory:13.1% Load:0.18 Connections:3
+09:21:07             CPU:0.0% Memory:13.1% Load:0.16 Connections:2
+09:21:12             CPU:0.0% Memory:13.1% Load:0.21 Connections:2
+09:21:17             CPU:0.0% Memory:13.1% Load:0.20 Connections:3
+09:21:22             CPU:0.0% Memory:13.1% Load:0.18 Connections:2
+09:21:28             CPU:0.0% Memory:13.2% Load:0.16 Connections:2
+09:21:33             CPU:0.0% Memory:13.1% Load:0.15 Connections:2
+09:21:38             CPU:0.0% Memory:13.1% Load:0.14 Connections:2
+09:21:43             CPU:0.0% Memory:13.1% Load:0.13 Connections:2
+09:21:48             CPU:33.3% Memory:13.1% Load:0.12 Connections:2
+09:21:53             CPU:25.0% Memory:13.1% Load:0.11 Connections:3
+09:21:59             CPU:0.0% Memory:13.1% Load:0.10 Connections:2
+09:22:04             CPU:0.0% Memory:13.1% Load:0.09 Connections:2
+09:22:09             CPU:0.0% Memory:13.2% Load:0.08 Connections:2
+09:22:14             CPU:0.0% Memory:13.1% Load:0.08 Connections:2
+09:22:19             CPU:33.3% Memory:13.1% Load:0.07 Connections:3
+09:22:25             CPU:0.0% Memory:13.1% Load:0.06 Connections:5
+09:22:30             CPU:33.3% Memory:13.1% Load:0.06 Connections:5
+09:22:35             CPU:0.0% Memory:13.1% Load:0.05 Connections:5
+09:22:40             CPU:0.0% Memory:13.1% Load:0.05 Connections:5
+09:22:45             CPU:0.0% Memory:13.1% Load:0.05 Connections:6
+09:22:51             CPU:0.0% Memory:13.1% Load:0.04 Connections:5
+09:22:56             CPU:33.3% Memory:13.1% Load:0.04 Connections:6
+09:23:01             CPU:0.0% Memory:13.1% Load:0.03 Connections:6
+09:23:06             CPU:50.0% Memory:13.2% Load:0.03 Connections:6
+09:23:11             CPU:0.0% Memory:13.1% Load:0.03 Connections:7
+09:23:16             CPU:33.3% Memory:13.1% Load:0.03 Connections:6
+09:23:22             CPU:33.3% Memory:13.1% Load:0.02 Connections:4
+09:23:27             CPU:0.0% Memory:13.1% Load:0.02 Connections:3
+09:23:32             CPU:0.0% Memory:13.3% Load:0.02 Connections:4
+09:23:37             CPU:33.3% Memory:13.2% Load:0.02 Connections:4
+09:23:42             CPU:0.0% Memory:13.2% Load:0.02 Connections:3
+09:23:48             CPU:0.0% Memory:13.1% Load:0.01 Connections:3
+09:23:53             CPU:0.0% Memory:13.1% Load:0.01 Connections:4
+09:23:58             CPU:33.3% Memory:13.1% Load:0.01 Connections:3
+09:24:03             CPU:0.0% Memory:13.1% Load:0.01 Connections:3
+09:24:08             CPU:50.0% Memory:13.1% Load:0.01 Connections:2
+09:24:13             CPU:33.3% Memory:13.1% Load:0.01 Connections:2
+09:24:19             CPU:50.0% Memory:13.1% Load:0.01 Connections:3
+09:24:24             CPU:0.0% Memory:13.1% Load:0.01 Connections:2
+09:24:29             CPU:0.0% Memory:13.1% Load:0.01 Connections:6
+09:24:34             CPU:0.0% Memory:13.2% Load:0.00 Connections:5
+09:24:39             CPU:0.0% Memory:13.1% Load:0.00 Connections:6
+09:24:45             CPU:0.0% Memory:13.1% Load:0.00 Connections:6
+09:24:50             CPU:0.0% Memory:13.1% Load:0.00 Connections:6
+09:24:55             CPU:0.0% Memory:13.1% Load:0.00 Connections:6
+09:25:00             CPU:50.0% Memory:13.1% Load:0.00 Connections:6
+09:25:05             CPU:0.0% Memory:13.1% Load:0.00 Connections:7
+09:25:11             CPU:0.0% Memory:13.1% Load:0.00 Connections:7
+09:25:16             CPU:0.0% Memory:13.2% Load:0.00 Connections:6
+09:25:21             CPU:0.0% Memory:13.1% Load:0.00 Connections:6
+09:25:26             CPU:0.0% Memory:13.1% Load:0.00 Connections:5
+09:25:31             CPU:0.0% Memory:13.1% Load:0.00 Connections:3
+09:25:36             CPU:33.3% Memory:13.1% Load:0.00 Connections:4
+09:25:42             CPU:0.0% Memory:13.1% Load:0.00 Connections:3
+09:25:47             CPU:0.0% Memory:13.2% Load:0.08 Connections:2
+09:25:52             CPU:0.0% Memory:13.2% Load:0.07 Connections:2
+09:25:57             CPU:0.0% Memory:13.2% Load:0.21 Connections:2
+09:26:02             CPU:0.0% Memory:13.2% Load:0.19 Connections:2
+09:26:08             CPU:0.0% Memory:13.1% Load:0.18 Connections:2
+09:26:13             CPU:0.0% Memory:13.1% Load:0.24 Connections:2
+09:26:18             CPU:0.0% Memory:13.1% Load:0.22 Connections:2
+09:26:23             CPU:0.0% Memory:13.2% Load:0.20 Connections:3
+09:26:28             CPU:33.3% Memory:13.1% Load:0.19 Connections:3
+09:26:34             CPU:33.3% Memory:13.2% Load:0.17 Connections:2
+09:26:39             CPU:33.3% Memory:13.1% Load:0.16 Connections:3
+09:26:44             CPU:0.0% Memory:13.2% Load:0.15 Connections:2
+09:26:49             CPU:0.0% Memory:13.1% Load:0.13 Connections:2
+09:26:54             CPU:0.0% Memory:13.1% Load:0.12 Connections:4
+09:26:59             CPU:25.0% Memory:13.1% Load:0.11 Connections:2
+09:27:05             CPU:0.0% Memory:13.1% Load:0.10 Connections:2
+09:27:10             CPU:0.0% Memory:13.1% Load:0.10 Connections:3
+09:27:15             CPU:0.0% Memory:13.1% Load:0.09 Connections:4
+09:27:20             CPU:0.0% Memory:13.1% Load:0.08 Connections:3
+09:27:25             CPU:0.0% Memory:13.1% Load:0.07 Connections:3
+09:27:31             CPU:0.0% Memory:13.1% Load:0.07 Connections:3
+09:27:36             CPU:0.0% Memory:13.1% Load:0.06 Connections:2
+09:27:41             CPU:33.3% Memory:13.1% Load:0.06 Connections:4
+09:27:46             CPU:0.0% Memory:13.1% Load:0.05 Connections:3
+09:27:51             CPU:0.0% Memory:13.1% Load:0.05 Connections:2
+09:27:56             CPU:0.0% Memory:13.1% Load:0.12 Connections:3
+09:28:02             CPU:0.0% Memory:13.1% Load:0.11 Connections:3
+09:28:07             CPU:0.0% Memory:13.1% Load:0.10 Connections:3
+09:28:12             CPU:0.0% Memory:13.1% Load:0.10 Connections:3
+09:28:17             CPU:0.0% Memory:13.2% Load:0.08 Connections:2
+
+📊 Monitoring Complete! Analysis:
+==================================
+CPU Usage:
+  Average: 0.0%
+  Peak:    50.0%
+
+Memory Usage:
+  Average: 0.0%
+  Peak:    13.7%
+
+System Load:
+  Average: 0.00
+
+HTTP Connections:
+  Peak concurrent: 7
+
+🎯 Recommendations:
+===================
+✅ CPU load acceptable for single Pi
+✅ Memory usage acceptable for single Pi
+✅ System load acceptable for single Pi
+
+📁 Full data saved to: pi_load_monitor.log
+   View with: cat pi_load_monitor.log | column -t -s','
